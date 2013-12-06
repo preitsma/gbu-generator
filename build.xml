@@ -1,0 +1,316 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project name="generator-run" default="run" basedir=".">
+    <description>Runs the GBU-generation</description>      
+        
+    <taskdef resource="net/sf/antcontrib/antcontrib.properties">
+        <classpath>
+            <pathelement location="ant-contrib-1.0b3.jar"/>
+        </classpath>
+    </taskdef>                
+                
+    <!-- import generator properties for GBU generator -->
+    <property name="properties.file" value="generator.properties"/>
+    <property file="${properties.file}"/>     
+    <!-- import other properties -->
+    <property file="build.properties"/> 
+    
+    <property file="${flm.version.dir}/current.release.properties"/>
+           
+    
+    <property name="uber.jar" value="gbu-generator.jar"/>   
+    <property name="dwzrun" value="dwzrun61.exe"/>       
+    
+    <!-- initializes parameters -->
+    <target name="init">
+        <echo message="Initializing properties"/>
+        <tstamp>
+            <format property="timestamp" pattern="d-MMMM-yyyy-HH-mm" locale="nl,NL" />
+        </tstamp>
+        <property name="timestamp" value="${timestamp}"/>                              
+        <property name="gen.workdir" value="${output.dir}/${configuration}-work"/>               
+                      
+        <!-- create DDL dir  -->                         
+        <property name="drop-triggers.dir" value="${gen.workdir}/drop-triggers"/> 
+        
+        <if>
+            <or>
+                <equals arg1="${properties.directory}" arg2=""/>
+                <not>
+                    <isset property="properties.directory"/>
+                </not>
+            </or>
+            <then>                
+                <property name="conf.dir" value="${flm.version.dir}/${current.release}/${configuration}${postfix}"/>
+                <echo message="Configuration dir assembled: ${conf.dir}"/>
+            </then>
+            <else>
+                <property name="conf.dir" value="${properties.directory}"/>
+                <echo message="Configuration dir from build.properties: ${conf.dir}"/>
+            </else>
+        </if> 
+  
+        <propertyregex property="gbu.targetdb.service"
+                       input="${gbu.targetdb.url}"
+                       regexp="jdbc:oracle:thin:@[\.a-zA-Z0-9]*:[0-9]*:(.*)" 
+                       select="\1"
+                       casesensitive="false" />
+        
+        <property name="connect.string" value="${gbu.targetdb.username}/${gbu.targetdb.password}@${gbu.targetdb.service}"/>
+               
+        <propertyregex property="include.drop-triggers" override="true" input="${include}" regexp="drop-triggers" select="\0"  />                                 
+        <propertyregex property="include.tapi" override="true" input="${include}" regexp="tapi" select="\0"  />                           
+        <propertyregex property="include.ddl" override="true" input="${include}" regexp="ddl" select="\0"  />                   
+        <propertyregex property="include.fmb" override="true" input="${include}" regexp="fmb" select="\0"  />              
+       
+        <if> 
+            <equals arg1="${include}" arg2=""/>
+            <then>          
+                <property name="include.drop-triggers" value="true" /> 
+                <property name="include.ddl" value="true" /> 
+                <property name="include.tapi" value="true" /> 
+                <property name="include.forms" value="true" /> 
+            </then>
+        </if>  
+                                 
+        <echoproperties>
+            <propertyset>
+                <propertyref regex="."/>
+            </propertyset>
+        </echoproperties>                           
+    </target>
+    
+    <!-- drops and recreates the working directory -->
+    <target description="" name="recreate.work.dir" depends="init">
+        <echo message="(Re)creating directory ${gen.workdir}"/>
+        <delete dir="${gen.workdir}"/>
+        <mkdir dir="${gen.workdir}"/>
+    </target>
+    
+    <!-- generates the GBU files -->    
+    <target description="generate the GBU file and the drop-triggers script" name="run-gbu-generator" depends="init, recreate.work.dir">  
+        <echo message="Run the GBU generator"/>                            
+        <java jar="${gbu-generator.dir}/${uber.jar}"
+              fork="true"
+              failonerror="true"
+              maxmemory="128m"
+        >
+            <jvmarg value="-Dproperties.file=${properties.file}" />
+            <arg line="-output.dir ${gen.workdir}"/>                                                                    
+            <arg line="-configuration ${configuration}"/>
+        </java>
+    </target>    
+      
+    <!-- drops the triggers -->      
+    <target description="drops the triggers" if="include.drop-triggers" name="drop-triggers"> 
+        <echo message="Drop the triggers in target database using SQL*Plus"/>  
+        <mkdir dir="${drop-triggers.dir}"/>       
+                                  
+        <sqlplus connectstring="${connect.string}"
+                 sql-script="${drop-triggers.dir}/drop-triggers.sql"
+                 output="${drop-triggers.dir}/drop-triggers.log"/>                
+        <echo message="Triggers succesfully dropped!"/>  
+    </target>    
+    
+    <!-- generates the GBU files, and subsequently the ddl, tapi and forms -->
+    <target description="run everything" name="run" depends="run-gbu-generator" >       
+        <echo message="runs everything"/> 
+        <antcall target="drop-triggers"/>
+        <antcall target="execute.ddl.dwzrun"/>
+        <antcall target="execute.tapi.dwzrun"/>
+        <antcall target="execute.forms.dwzrun"/>
+    </target>
+    
+    <!-- generates the DDL scripts from the ddl.gbu -->
+    <target description="generate ddl from GBU file" name="execute.ddl.dwzrun" if="include.ddl"  >                    
+        <!-- make sure the db does not execute the ddl -->
+        <sqlplus connectstring="${connect.string}"
+                 sql-script="${basedir}/disallow-ddl.sql"
+                 output="${gen.workdir}/ddl/disallow_ddl.log"/>   
+        <dwzrun type="ddl"/>      
+        <!-- allow ddl generation afterwards -->
+        <sqlplus connectstring="${connect.string}"
+                 sql-script="${basedir}/reallow-ddl.sql"
+                 output="${gen.workdir}/ddl/reallow_ddl.log"/>    
+    </target>
+    
+    <!-- generates the tapi scripts from the tapi.gbu -->
+    <target description="generate tapi from GBU file" name="execute.tapi.dwzrun" if="include.tapi" >    
+        <dwzrun type="tapi"/>      
+    </target>
+    
+    <!-- generates the forms scripts from the forms.gbu -->
+    <target description="generate forms from GBU file" name="execute.forms.dwzrun" if="include.forms" > 
+        <!-- set some properties in the registry -->       
+        <reginsert-cgen-key value.name="TFMPTH" value.data="${generate.template.dir}" description="form template path" />                      
+        <reginsert-cgen-key value.name="SFMDBS" value.data="${generate.connectstring}" description="form generator connect string"  />
+        <reginsert-cgen-key value.name="SMNDBS" value.data="${generate.connectstring}" description="menu generator connect string"/>
+        <reginsert-cgen-key value.name="GFMDBS" value.data="${generate.connectstring}" description="form compile connect string"/>
+        <reginsert-cgen-key value.name="GMNDBS" value.data="${generate.connectstring}" description="menu compile connect string"/>             
+        <reginsert-cgen-key value.name="FMBPTH" value.data="${gen.workdir}/fmb" description="form fmb output path"/>             
+        <reginsert-cgen-key value.name="MMBPTH" value.data="${gen.workdir}/menus" description="menu output path"/>             
+        <reginsert-cgen-key value.name="FMXPTH" value.data="${gen.workdir}/fmb" description="form executable output path"/>             
+        <reginsert-cgen-key value.name="MMXPTH" value.data="${gen.workdir}/menus" description="menu executable output path"/>                                                            
+        <dwzrun type="fmb"/>   
+    </target>
+    
+    <!-- copies the working dir to the subversion directory -->
+    <target description="copies the work directory to subversion dir" name="copy.work.to.svn"  depends="init">
+        <mkdir dir="${conf.dir}"/>
+        <copy todir="${conf.dir}">
+            <fileset dir="${gen.workdir}" excludes="**/*.err, **/*.gbu, drop-triggers/"/>
+        </copy>  
+    </target>  
+    
+    <!-- create configuration properties file for one call -->
+    <target description="creates a properties file for one call" name="create.config.properties" depends="init">              
+        <property name="property.file" value="${conf.dir}/${configuration}${postfix}.properties"/>                 
+        
+        <echo message="Creating property file ${property.file}"/>
+        <!-- write the property file -->
+        <propertyfile file="${property.file}" 
+                      comment="Properties for configuration ${configuration}${postfix}, generated automatically by script">
+            <entry  key="change.release.version" value="${current.release}" />
+            <entry  key="change.number" value="${configuration}${postfix}"/>   
+            
+            <!-- write the fmb directory -->         
+            <entry  key="change.contains.folders.fmb" value="fmb"/>
+        </propertyfile>           
+           
+        <!-- write names of all form files -->    
+        <write-files-in-dir property-file="${property.file}" property-name="change.contains.fmb" dir="${conf.dir}/fmb" include="*.fmb,*.fmx"/>
+        
+        <!-- write names of all script directories --> 
+        <write-dirs-in-dir  property-file="${property.file}" property-name="change.contains.folders.script" dir="${conf.dir}" exclude="fmb"/>    
+        
+        <!-- iteratie through script directories and list the files --> 
+        <foreach target="write-one-dir" param="param" inheritall="true">
+            <path>            
+                <dirset dir="${conf.dir}" includes="**/*" excludes="fmb"/>
+            </path>
+        </foreach>           
+                                                              
+    </target>   
+        
+    <target name="write-one-dir">
+        <basename property="dir.name" file="${param}"/>
+        <write-files-in-dir property-file="${property.file}"
+                            property-name="change.contains.${dir.name}"
+                            dir="${conf.dir}/${dir.name}"
+                            include="*.sql, *.vw, *.pck"/>       
+    </target>      
+    
+    <!--  macrodefinitions - macrodefinitions- macrodefinitions - macrodefinitions - macrodefinitions  -->
+    
+    <!-- write all files in one dir to comma separated string to property file -->
+    <macrodef name="write-files-in-dir">
+        <attribute name="property-file"/>
+        <attribute name="property-name"/>
+        <attribute name="include"/>
+        <attribute name="dir"/>
+        <sequential>
+            <local name="prop-value"/>
+            <echo message="setting property @{property-name} with contents of @{dir}, files of type @{include}..."/>
+            <fileset dir="@{dir}" includes="@{include}" id="files" />
+            <pathconvert dirsep="/" refid="files" property="prop-value" pathsep=",">
+                <flattenmapper/>
+            </pathconvert> 
+            <propertyfile file="@{property-file}">
+                <entry key="@{property-name}" value="${prop-value}"/>
+            </propertyfile> 
+            <echo message=".. writing value ${prop-value}"/>
+        </sequential>                
+    </macrodef>
+    
+    <!-- write all dirs in one dir to comma separated string to property file -->
+    <macrodef name="write-dirs-in-dir">
+        <attribute name="property-file"/>
+        <attribute name="property-name"/>
+        <attribute name="exclude"/>
+        <attribute name="dir"/>
+        <sequential>
+            <local name="prop-value"/>
+            <echo message="setting property @{property-name} with contents of @{dir}, files of type @{include}..."/>
+            <dirset dir="@{dir}" excludes="@{exclude}" includes="*/**" id="dirs" />
+            <pathconvert dirsep="/" refid="dirs" property="prop-value" pathsep=",">
+                <flattenmapper/>
+            </pathconvert> 
+            <propertyfile file="@{property-file}">
+                <entry key="@{property-name}" value="${prop-value}"/>
+            </propertyfile> 
+            <echo message=".. writing value ${prop-value}"/>
+        </sequential>                
+    </macrodef>
+    
+    <!-- run a GBU file of a certain type -->
+    <macrodef name="dwzrun">
+        <attribute name="type"/>        
+        <sequential>
+            <echo message="Execute the @{type} GBU file"/> 
+            
+            <!-- kick of the run --> 
+            <exec dir="${gen.workdir}/@{type}"
+                  executable="${dwzrun}" 
+                  spawn="true">
+                <arg line="${gen.workdir}/@{type}/@{type}.gbu"/>
+            </exec>
+                 
+            <echo message="Waiting for logfile creation in ${gen.workdir}/@{type} ..."/>        
+            <waitfor maxwait="60" maxwaitunit="second" timeoutproperty="timeout">
+                <available file="${gen.workdir}/@{type}/dwzrun.log" />
+            </waitfor>  
+        
+            <fail if="timeout" message="Time out waiting for logfile ${gen.workdir}/@{type}/dwzrun.log}"/> 
+            <echo message="... logfile found"/>                      
+        
+            <echo message="Polling logfile for 'Batch Process Completed'..."/>        
+            <waitfor maxwait="60" maxwaitunit="minute" timeoutproperty="timeout2">
+                <resourcecontains resource="${gen.workdir}/@{type}/dwzrun.log" substring="Batch Process Completed"  />
+            </waitfor>
+        
+            <fail if="timeout2" message="Time out while batch generating @{type}"/>  
+            <echo message="... process finished"/>                                                        
+        
+            <echo message="@{type} generation completed!"/>  
+            
+            <echo message="Kill the ${dwzrun} process ..."/>
+            <exec executable="taskkill">
+                <arg line="/IM ${dwzrun}"/>
+            </exec>              
+            
+        </sequential>
+        
+    </macrodef>
+    
+    <!-- insert a key into the registry -->  
+    <macrodef name="reginsert-cgen-key">
+        <attribute name="key" default="HKEY_CURRENT_USER\SOFTWARE\ORACLE\KEY_OraIDS10g\CGENF61\OPTIONS" />      
+        <attribute name="value.name" />
+        <attribute name="value.data" />
+        <attribute name="description" />
+        <sequential>
+            <echo message="setting key for @{description}" />
+            <echo message="inserting @{value.name}=@{value.data} into registry @{key}" />
+            <exec executable="reg" >
+                <arg line="ADD @{key} /v @{value.name} /d @{value.data} /f "/>
+            </exec>            
+        </sequential>        
+    </macrodef>
+     
+    <!-- run sqlplus -->        
+    <macrodef name="sqlplus">
+        <attribute name="connectstring" />
+        <attribute name="sql-script" />
+        <attribute name="output" default="sql-log.sql"/>       
+        <sequential>
+            <echo>Running script @{sql-script}, against @{connectstring}</echo>
+            <exec executable="sqlplus" 
+                  failonerror="true" 
+                  dir="${sqlplus.dir}" 
+                  output="@{output}">
+                <arg line="@{connectstring} @'@{sql-script}'"/>
+                <env key="ORACLE_HOME" value="C:\Oracle\OraIDS10g\"/>
+            </exec>           
+        </sequential>
+    </macrodef>
+              
+</project>
